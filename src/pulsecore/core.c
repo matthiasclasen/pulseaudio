@@ -150,6 +150,9 @@ pa_core* pa_core_new(pa_mainloop_api *m, bool shared, bool enable_memfd, size_t 
     for (j = 0; j < PA_CORE_HOOK_MAX; j++)
         pa_hook_init(&c->hooks[j], c);
 
+    for (j = 0; j < PA_ACCESS_HOOK_MAX; j++)
+        pa_hook_init(&c->access[j], c);
+
     pa_random(&c->cookie, sizeof(c->cookie));
 
 #ifdef SIGPIPE
@@ -219,6 +222,8 @@ static void core_free(pa_object *o) {
 
     for (j = 0; j < PA_CORE_HOOK_MAX; j++)
         pa_hook_done(&c->hooks[j]);
+    for (j = 0; j < PA_ACCESS_HOOK_MAX; j++)
+        pa_hook_done(&c->access[j]);
 
     pa_xfree(c);
 }

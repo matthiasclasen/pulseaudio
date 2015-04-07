@@ -947,6 +947,7 @@ libpulsecore_@PA_MAJORMINOR@_la_SOURCES = \
 		pulsecore/filter/lfe-filter.c pulsecore/filter/lfe-filter.h \
 		pulsecore/filter/biquad.c pulsecore/filter/biquad.h \
 		pulsecore/filter/crossover.c pulsecore/filter/crossover.h \
+		pulsecore/access.h \
 		pulsecore/asyncmsgq.c pulsecore/asyncmsgq.h \
 		pulsecore/asyncq.c pulsecore/asyncq.h \
 		pulsecore/auth-cookie.c pulsecore/auth-cookie.h \
