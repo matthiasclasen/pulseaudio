@@ -206,7 +206,7 @@ void pa_subscription_post(pa_core *c, pa_subscription_event_type_t t, uint32_t i
     pa_subscription_event *e;
     pa_assert(c);
 
-    /* No need for queuing subscriptions of no one is listening */
+    /* No need for queuing subscriptions if no one is listening */
     if (!c->subscriptions)
         return;
 
