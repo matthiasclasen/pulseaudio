@@ -97,6 +97,19 @@ void pa_tagstruct_free(pa_tagstruct*t) {
         pa_xfree(t);
 }
 
+pa_tagstruct *pa_tagstruct_copy(pa_tagstruct*t) {
+    pa_tagstruct*tc;
+
+    if (!(tc = pa_flist_pop(PA_STATIC_FLIST_GET(tagstructs))))
+        tc = pa_xnew(pa_tagstruct, 1);
+    tc->data = pa_xmemdup(t->data, t->length);
+    tc->allocated = t->length;
+    tc->rindex = 0;
+    tc->type = PA_TAGSTRUCT_DYNAMIC;
+
+    return tc;
+}
+
 static inline void extend(pa_tagstruct*t, size_t l) {
     pa_assert(t);
     pa_assert(t->type != PA_TAGSTRUCT_FIXED);
