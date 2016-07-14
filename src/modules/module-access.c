@@ -26,6 +26,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -40,6 +41,7 @@
 #include <pulsecore/log.h>
 #include <pulsecore/sink-input.h>
 #include <pulsecore/core-util.h>
+#include <pulsecore/dbus-shared.h>
 
 #include "module-access-symdef.h"
 
@@ -86,7 +88,9 @@ struct userdata {
 
     pa_idxset *policies;
     uint32_t default_policy;
+    uint32_t portal_policy;
 
+    pa_dbus_connection *connection;
     pa_hashmap *clients;
     pa_hook_slot *client_put_slot;
     pa_hook_slot *client_proplist_changed_slot;
@@ -98,6 +102,7 @@ struct client_data {
 
     uint32_t index;
     uint32_t policy;
+    pid_t pid;
 
     struct async_cache cached[PA_ACCESS_HOOK_MAX];
     pa_time_event *time_event;
@@ -153,13 +158,14 @@ static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval
     d->async_finish_cb (d, cd->cached[d->hook].granted);
 }
 
-static client_data * client_data_new(struct userdata *u, uint32_t index, uint32_t policy) {
+static client_data * client_data_new(struct userdata *u, uint32_t index, uint32_t policy, pid_t pid) {
     client_data *cd;
 
     cd = pa_xnew0(client_data, 1);
     cd->u = u;
     cd->index = index;
     cd->policy = policy;
+    cd->pid = pid;
     cd->time_event = pa_core_rttime_new(u->core, PA_USEC_INVALID, timeout_cb, cd);
     pa_hashmap_put(u->clients, PA_UINT32_TO_PTR(index), cd);
     pa_log("new client %d with policy %d", index, policy);
@@ -261,6 +267,120 @@ static pa_hook_result_t rule_check_async (pa_core *c, pa_access_data *d, struct 
     return PA_HOOK_CANCEL;
 }
 
+static DBusHandlerResult portal_response(DBusConnection *connection, DBusMessage *msg, void *user_data)
+{
+    client_data *cd = user_data;
+    pa_access_data *d = cd->access_data;
+
+    if (dbus_message_is_signal(msg, "org.freedesktop.portal.Request", "Response")) {
+        uint32_t response = 2;
+        DBusError error;
+
+        dbus_error_init(&error);
+
+        dbus_connection_remove_filter (connection, portal_response, cd);
+
+        if (!dbus_message_get_args(msg, &error, DBUS_TYPE_UINT32, &response, DBUS_TYPE_INVALID)) {
+            pa_log("Failed to parse Response: %s\n", error.message);
+            dbus_error_free(&error);
+          }
+
+        pa_log("portal response: %d\n", response);
+
+        cd->cached[d->hook].checked = true;
+        /* this should be granted or denied */
+        cd->cached[d->hook].granted = response == 0 ? true : false;
+
+        d->async_finish_cb (d, cd->cached[d->hook].granted);
+
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+
+    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+static pa_hook_result_t rule_check_portal (pa_core *c, pa_access_data *d, struct userdata *u) {
+    client_data *cd = client_data_get(u, d->client_index);
+    DBusMessage *m = NULL, *r = NULL;
+    DBusError error;
+    pid_t pid;
+    DBusMessageIter msg_iter;
+    DBusMessageIter dict_iter;
+    const char *handle;
+    const char *device;
+
+    if (cd->cached[d->hook].checked) {
+        pa_log("returned cached answer for portal check: %d\n", cd->cached[d->hook].granted);
+        return cd->cached[d->hook].granted ? PA_HOOK_OK : PA_HOOK_STOP;
+    }
+
+    pa_log("ask portal for operation %d/%d for client %d", d->hook, d->object_index, d->client_index);
+
+    cd->access_data = d;
+
+    dbus_error_init(&error);
+
+    if (!(m = dbus_message_new_method_call("org.freedesktop.portal.Desktop",
+                                           "/org/freedesktop/portal/desktop",
+                                           "org.freedesktop.portal.Device",
+                                           "AccessDevice"))) {
+        return PA_HOOK_STOP;
+    }
+
+    if (d->hook == PA_ACCESS_HOOK_CONNECT_RECORD)
+      device = "microphone";
+    else if (d->hook == PA_ACCESS_HOOK_CONNECT_PLAYBACK)
+      device = "speakers";
+    else
+      pa_assert_not_reached ();
+    pid = cd->pid;
+    if (!dbus_message_append_args(m,
+                                  DBUS_TYPE_UINT32, &pid,
+                                  DBUS_TYPE_INVALID)) {
+        dbus_message_unref(m);
+        return PA_HOOK_STOP;
+    }
+
+    dbus_message_iter_init_append(m, &msg_iter);
+    dbus_message_iter_open_container (&msg_iter, DBUS_TYPE_ARRAY, "s", &dict_iter);
+    dbus_message_iter_append_basic (&dict_iter, DBUS_TYPE_STRING, &device);
+    dbus_message_iter_close_container (&msg_iter, &dict_iter);
+
+    dbus_message_iter_open_container (&msg_iter, DBUS_TYPE_ARRAY, "{sv}", &dict_iter);
+    dbus_message_iter_close_container (&msg_iter, &dict_iter);
+
+    if (!(r = dbus_connection_send_with_reply_and_block(pa_dbus_connection_get(u->connection), m, -1, &error))) {
+        pa_log("Failed to call portal: %s\n", error.message);
+        dbus_error_free(&error);
+        dbus_message_unref(m);
+        return PA_HOOK_STOP;
+    }
+
+    dbus_message_unref(m);
+
+    if (!dbus_message_get_args(r, &error, DBUS_TYPE_OBJECT_PATH, &handle, DBUS_TYPE_INVALID)) {
+        pa_log("Failed to parse AccessDevice result: %s\n", error.message);
+        dbus_error_free(&error);
+        dbus_message_unref(r);
+        return PA_HOOK_STOP;
+    }
+
+    dbus_message_unref(r);
+
+    dbus_bus_add_match(pa_dbus_connection_get(u->connection),
+                       "type='signal',interface='org.freedesktop.portal.Request'",
+                       &error);
+    dbus_connection_flush(pa_dbus_connection_get(u->connection));
+    if (dbus_error_is_set(&error)) {
+        pa_log("Failed to subscribe to Request signal: %s\n", error.message);
+        dbus_error_free(&error);
+        return PA_HOOK_STOP;
+    }
+
+    dbus_connection_add_filter(pa_dbus_connection_get(u->connection), portal_response, cd, NULL);
+
+    return PA_HOOK_CANCEL;
+}
 
 static access_policy *access_policy_new(struct userdata *u, bool allow_all) {
     access_policy *ap;
@@ -363,6 +483,65 @@ block:
     return PA_HOOK_STOP;
 }
 
+static pid_t
+find_pid_for_client (pa_client *cl)
+{
+    const char *s;
+    pid_t pid;
+
+    if (!pa_proplist_contains(cl->proplist, PA_PROP_APPLICATION_PROCESS_ID))
+        return 0;
+
+    s = pa_proplist_gets(cl->proplist, PA_PROP_APPLICATION_PROCESS_ID);
+    if (pa_atoi(s, &pid) < 0)
+        return 0;
+
+    return pid;
+}
+
+static bool
+client_is_sandboxed (pa_client *cl)
+{
+    char *path;
+    char data[2048];
+    int n;
+    const char *state = NULL;
+    const char *current;
+    bool result;
+    int fd;
+    pid_t pid;
+
+    pid = find_pid_for_client (cl);
+    if (pid == 0) {
+        pa_log ("no pid found, assuming not sandboxed\n");
+        return false;
+    }
+
+    path = pa_sprintf_malloc("/proc/%u/cgroup", pid);
+    fd = pa_open_cloexec(path, O_RDONLY, 0);
+    free (path);
+
+    if (fd == -1)
+      return false;
+
+    pa_loop_read(fd, &data, sizeof(data), NULL);
+    close(fd);
+
+    result = false;
+    while ((current = pa_split_in_place(data, "\n", &n, &state)) != NULL) {
+        if (strncmp(current, "1:name=systemd:", strlen("1:name=systemd:")) == 0) {
+            const char *p = strstr(current, "flatpak-");
+            if (p && p - current < n) {
+                pa_log("found a flatpak cgroup, assuming sandboxed\n");
+                result = true;
+                break;
+            }
+        }
+    }
+
+   return result;
+}
+
 static uint32_t find_policy_for_client (struct userdata *u, pa_client *cl) {
     char *s;
 
@@ -370,13 +549,21 @@ static uint32_t find_policy_for_client (struct userdata *u, pa_client *cl) {
     pa_log ("client proplist %s", s);
     pa_xfree(s);
 
-    return u->default_policy;
+    if (1 || client_is_sandboxed (cl)) {
+        pa_log("client is sandboxed, choosing portal policy\n");
+        return u->portal_policy;
+    }
+    else {
+        pa_log("client not sandboxed, choosing default policy\n");
+        return u->default_policy;
+    }
 }
 
 static pa_hook_result_t client_put_cb(pa_core *c, pa_object *o, struct userdata *u) {
     pa_client *cl;
     uint32_t policy;
 
+pa_log("client put\n");
     pa_assert(c);
     pa_object_assert_ref(o);
 
@@ -385,7 +572,7 @@ static pa_hook_result_t client_put_cb(pa_core *c, pa_object *o, struct userdata 
 
     policy = find_policy_for_client(u, cl);
 
-    client_data_new(u, cl->index, policy);
+    client_data_new(u, cl->index, policy, find_pid_for_client(cl));
 
     return PA_HOOK_OK;
 }
@@ -395,6 +582,7 @@ static pa_hook_result_t client_proplist_changed_cb(pa_core *c, pa_object *o, str
     client_data *cd;
     uint32_t policy;
 
+pa_log("proplist changed\n");
     pa_assert(c);
     pa_object_assert_ref(o);
 
@@ -407,6 +595,8 @@ static pa_hook_result_t client_proplist_changed_cb(pa_core *c, pa_object *o, str
 
     policy = find_policy_for_client(u, cl);
     cd->policy = policy;
+    cd->pid = find_pid_for_client(cl);
+pa_log("pid now %d, policy %d\n", cd->pid, cd->policy);
 
     return PA_HOOK_OK;
 }
@@ -431,6 +621,7 @@ int pa__init(pa_module*m) {
     struct userdata *u;
     int i;
     access_policy *ap;
+    DBusError error;
 
     pa_assert(m);
 
@@ -442,6 +633,13 @@ int pa__init(pa_module*m) {
     u = pa_xnew0(struct userdata, 1);
     u->core = m->core;
     m->userdata = u;
+
+    dbus_error_init(&error);
+
+    if (!(u->connection = pa_dbus_bus_get (u->core, DBUS_BUS_SESSION, &error))) {
+        pa_log("Failed to connect to session bus: %s\n", error.message);
+        dbus_error_free(&error);
+    }
 
     u->policies = pa_idxset_new (NULL, NULL);
     u->clients = pa_hashmap_new_full(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func, NULL,
@@ -493,6 +691,37 @@ int pa__init(pa_module*m) {
 
     u->default_policy = ap->index;
 
+    ap = access_policy_new(u, false);
+
+    ap->rule[PA_ACCESS_HOOK_GET_SINK_INFO] = rule_allow;
+    ap->rule[PA_ACCESS_HOOK_GET_SOURCE_INFO] = rule_allow;
+    ap->rule[PA_ACCESS_HOOK_GET_SERVER_INFO] = rule_allow;
+    ap->rule[PA_ACCESS_HOOK_GET_MODULE_INFO] = rule_allow;
+    ap->rule[PA_ACCESS_HOOK_GET_CARD_INFO] = rule_allow;
+    ap->rule[PA_ACCESS_HOOK_STAT] = rule_allow;
+    ap->rule[PA_ACCESS_HOOK_GET_SAMPLE_INFO] = rule_allow;
+    ap->rule[PA_ACCESS_HOOK_PLAY_SAMPLE] = rule_check_portal;
+    ap->rule[PA_ACCESS_HOOK_CONNECT_PLAYBACK] = rule_check_portal;
+
+    ap->rule[PA_ACCESS_HOOK_CONNECT_RECORD] = rule_check_portal;
+
+    ap->rule[PA_ACCESS_HOOK_GET_CLIENT_INFO] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_KILL_CLIENT] = rule_check_owner;
+
+    ap->rule[PA_ACCESS_HOOK_GET_SINK_INPUT_INFO] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_MOVE_SINK_INPUT] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_SET_SINK_INPUT_VOLUME] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_SET_SINK_INPUT_MUTE] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_KILL_SINK_INPUT] = rule_check_owner;
+
+    ap->rule[PA_ACCESS_HOOK_GET_SOURCE_OUTPUT_INFO] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_MOVE_SOURCE_OUTPUT] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_SET_SOURCE_OUTPUT_VOLUME] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_SET_SOURCE_OUTPUT_MUTE] = rule_check_owner;
+    ap->rule[PA_ACCESS_HOOK_KILL_SOURCE_OUTPUT] = rule_check_owner;
+
+    u->portal_policy = ap->index;
+
     pa_modargs_free(ma);
     return 0;
 
@@ -530,6 +759,9 @@ void pa__done(pa_module*m) {
 
     if (u->clients)
         pa_hashmap_free(u->clients);
+
+    if (u->connection)
+        pa_dbus_connection_unref (u->connection);
 
     pa_xfree(u);
 }

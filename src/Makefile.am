@@ -1602,8 +1602,9 @@ module_simple_protocol_unix_la_LIBADD = $(MODULE_LIBADD) libprotocol-simple.la
 
 # Access control
 module_access_la_SOURCES = modules/module-access.c
+module_access_la_CFLAGS = $(AM_CDFLAGS) $(DBUS_CFLAGS)
 module_access_la_LDFLAGS = $(MODULE_LDFLAGS)
-module_access_la_LIBADD = $(MODULE_LIBADD)
+module_access_la_LIBADD = $(MODULE_LIBADD) $(DBUS_LIBS)
 
 # CLI protocol
 
