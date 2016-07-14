@@ -5636,9 +5636,12 @@ typedef struct pa_protocol_native_access_data {
 static void check_access_finish_cb(pa_access_data *data, bool res) {
     pa_protocol_native_access_data *d = (pa_protocol_native_access_data *) data;
     pa_native_connection *c = PA_NATIVE_CONNECTION(d->userdata);
+    uint32_t command, tag;
 
-    if (!res) {
-        pa_pstream_send_error(c->pstream, d->tag, PA_ERR_ACCESS); \
+    if (!res || pa_tagstruct_getu32(d->tc, &command) < 0 ||
+        pa_tagstruct_getu32(d->tc, &tag) < 0 ||
+        command != d->command || tag != d->tag) {
+        pa_pstream_send_error(c->pstream, d->tag, PA_ERR_ACCESS);
         goto finish;
     }
 
