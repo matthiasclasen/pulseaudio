@@ -104,6 +104,7 @@ pa_tagstruct *pa_tagstruct_copy(pa_tagstruct*t) {
         tc = pa_xnew(pa_tagstruct, 1);
     tc->data = pa_xmemdup(t->data, t->length);
     tc->allocated = t->length;
+    tc->length = t->length;
     tc->rindex = 0;
     tc->type = PA_TAGSTRUCT_DYNAMIC;
 
