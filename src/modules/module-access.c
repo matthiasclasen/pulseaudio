@@ -30,6 +30,8 @@
 #include <stdlib.h>
 
 #include <pulse/xmalloc.h>
+#include <pulse/rtclock.h>
+#include <pulse/timeval.h>
 
 #include <pulsecore/core-error.h>
 #include <pulsecore/module.h>
@@ -71,11 +73,10 @@ struct event_item {
     int facility;
     uint32_t object_index;
 };
-struct client_data {
-    uint32_t index;
-    uint32_t policy;
 
-    PA_LLIST_HEAD(event_item, events);
+struct async_cache {
+  bool checked;
+  bool granted;
 };
 
 struct userdata {
@@ -91,6 +92,20 @@ struct userdata {
     pa_hook_slot *client_proplist_changed_slot;
     pa_hook_slot *client_unlink_slot;
 };
+
+struct client_data {
+    struct userdata *u;
+
+    uint32_t index;
+    uint32_t policy;
+
+    struct async_cache cached[PA_ACCESS_HOOK_MAX];
+    pa_time_event *time_event;
+    pa_access_data *access_data;
+
+    PA_LLIST_HEAD(event_item, events);
+};
+
 
 static void add_event(struct client_data *cd, int facility, uint32_t oidx) {
     event_item *i;
@@ -123,12 +138,29 @@ static bool remove_event(struct client_data *cd, int facility, uint32_t oidx) {
     return false;
 }
 
+static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval *t, void *data) {
+    client_data *cd = data;
+    struct userdata *u = cd->u;
+    pa_access_data *d = cd->access_data;
+
+    pa_log("async check finished of operation %d/%d for client %d", d->hook, d->object_index, d->client_index);
+    u->core->mainloop->time_restart(cd->time_event, NULL);
+
+    cd->cached[d->hook].checked = true;
+    /* this should be granted or denied */
+    cd->cached[d->hook].granted = true;
+
+    d->async_finish_cb (d, cd->cached[d->hook].granted);
+}
+
 static client_data * client_data_new(struct userdata *u, uint32_t index, uint32_t policy) {
     client_data *cd;
 
     cd = pa_xnew0(client_data, 1);
+    cd->u = u;
     cd->index = index;
     cd->policy = policy;
+    cd->time_event = pa_core_rttime_new(u->core, PA_USEC_INVALID, timeout_cb, cd);
     pa_hashmap_put(u->clients, PA_UINT32_TO_PTR(index), cd);
     pa_log("new client %d with policy %d", index, policy);
 
@@ -143,6 +175,7 @@ static void client_data_free(client_data *cd) {
         pa_xfree(e);
     }
     pa_log("removed client %d", cd->index);
+    cd->u->core->mainloop->time_free(cd->time_event);
     pa_xfree(cd);
 }
 
@@ -207,6 +240,27 @@ static pa_hook_result_t rule_block (pa_core *c, pa_access_data *d, struct userda
     pa_log("blocked operation %d/%d for client %d", d->hook, d->object_index, d->client_index);
     return PA_HOOK_STOP;
 }
+
+
+/* rule asynchronously checks the operation */
+static pa_hook_result_t rule_check_async (pa_core *c, pa_access_data *d, struct userdata *u) {
+    pa_usec_t now;
+    client_data *cd = client_data_get(u, d->client_index);
+
+    pa_log("async check of operation %d/%d for client %d", d->hook, d->object_index, d->client_index);
+
+    if (cd->cached[d->hook].checked)
+      return cd->cached[d->hook].granted ? PA_HOOK_OK : PA_HOOK_STOP;
+
+    /* save access_data */
+    cd->access_data = d;
+
+    now = pa_rtclock_now();
+    pa_core_rttime_restart (u->core, cd->time_event, now + 2 * PA_USEC_PER_SEC);
+
+    return PA_HOOK_CANCEL;
+}
+
 
 static access_policy *access_policy_new(struct userdata *u, bool allow_all) {
     access_policy *ap;
@@ -419,6 +473,8 @@ int pa__init(pa_module*m) {
     ap->rule[PA_ACCESS_HOOK_GET_SAMPLE_INFO] = rule_allow;
     ap->rule[PA_ACCESS_HOOK_PLAY_SAMPLE] = rule_allow;
     ap->rule[PA_ACCESS_HOOK_CONNECT_PLAYBACK] = rule_allow;
+
+    ap->rule[PA_ACCESS_HOOK_CONNECT_RECORD] = rule_check_async;
 
     ap->rule[PA_ACCESS_HOOK_GET_CLIENT_INFO] = rule_check_owner;
     ap->rule[PA_ACCESS_HOOK_KILL_CLIENT] = rule_check_owner;
