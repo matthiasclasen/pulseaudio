@@ -42,7 +42,7 @@
 #include <pulsecore/core-util.h>
 #include <pulsecore/dbus-shared.h>
 
-#include "module-access-symdef.h"
+#include "module-flatpak-symdef.h"
 
 PA_MODULE_AUTHOR("Matthias Clasen");
 PA_MODULE_DESCRIPTION("Controls access to server resources for flatpak apps");
