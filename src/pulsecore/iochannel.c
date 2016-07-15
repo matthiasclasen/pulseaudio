@@ -323,13 +323,14 @@ ssize_t pa_iochannel_write_with_creds(pa_iochannel*io, const void*data, size_t l
 
     u = (struct ucred*) CMSG_DATA(&cmsg.hdr);
 
-    u->pid = getpid();
     if (ucred) {
         u->uid = ucred->uid;
         u->gid = ucred->gid;
+        u->pid = ucred->pid;
     } else {
         u->uid = getuid();
         u->gid = getgid();
+        u->pid = getpid();
     }
 
     pa_zero(mh);
@@ -437,6 +438,7 @@ ssize_t pa_iochannel_read_with_ancil_data(pa_iochannel*io, void*data, size_t l, 
 
                 ancil_data->creds.gid = u.gid;
                 ancil_data->creds.uid = u.uid;
+                ancil_data->creds.pid = u.pid;
                 ancil_data->creds_valid = true;
             }
             else if (cmh->cmsg_type == SCM_RIGHTS) {

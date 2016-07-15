@@ -1857,6 +1857,7 @@ static void on_connection(pa_socket_client *sc, pa_iochannel *io, void *userdata
 
     ucred.uid = getuid();
     ucred.gid = getgid();
+    ucred.pid = getpid();
 
     pa_pstream_send_tagstruct_with_creds(u->pstream, t, &ucred);
 }

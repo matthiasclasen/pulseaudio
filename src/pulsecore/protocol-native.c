@@ -2570,6 +2570,7 @@ static void command_auth(pa_pdispatch *pd, uint32_t command, uint32_t tag, pa_ta
     pa_tagstruct *reply;
     pa_mem_type_t shm_type;
     bool shm_on_remote = false, do_shm;
+    const pa_creds *creds = NULL;
 
     pa_native_connection_assert_ref(c);
     pa_assert(t);
@@ -2607,13 +2608,19 @@ static void command_auth(pa_pdispatch *pd, uint32_t command, uint32_t tag, pa_ta
 
     pa_proplist_setf(c->client->proplist, "native-protocol.version", "%u", c->version);
 
+#ifdef HAVE_CREDS
+    creds = pa_pdispatch_creds(pd);
+#endif
+
+    if (creds) {
+        c->client->creds = *creds;
+        c->client->creds_valid = true;
+    }
+
     if (!c->authorized) {
         bool success = false;
 
-#ifdef HAVE_CREDS
-        const pa_creds *creds;
-
-        if ((creds = pa_pdispatch_creds(pd))) {
+        if (creds) {
             if (creds->uid == getuid())
                 success = true;
             else if (c->options->auth_group) {
@@ -2638,7 +2645,6 @@ static void command_auth(pa_pdispatch *pd, uint32_t command, uint32_t tag, pa_ta
                         (unsigned long) creds->gid,
                         (int) success);
         }
-#endif
 
         if (!success && c->options->auth_cookie) {
             const uint8_t *ac;
@@ -2672,17 +2678,13 @@ static void command_auth(pa_pdispatch *pd, uint32_t command, uint32_t tag, pa_ta
         if (c->version < 10 || (c->version >= 13 && !shm_on_remote))
             do_shm = false;
 
-#ifdef HAVE_CREDS
     if (do_shm) {
         /* Only enable SHM if both sides are owned by the same
          * user. This is a security measure because otherwise data
          * private to the user might leak. */
-
-        const pa_creds *creds;
-        if (!(creds = pa_pdispatch_creds(pd)) || getuid() != creds->uid)
+        if (!creds || getuid() != creds->uid)
             do_shm = false;
     }
-#endif
 
     pa_log_debug("Negotiated SHM: %s", pa_yes_no(do_shm));
     pa_pstream_enable_shm(c->pstream, do_shm);
@@ -2714,6 +2716,7 @@ static void command_auth(pa_pdispatch *pd, uint32_t command, uint32_t tag, pa_ta
 
     ucred.uid = getuid();
     ucred.gid = getgid();
+    ucred.pid = getpid();
 
     pa_pstream_send_tagstruct_with_creds(c->pstream, reply, &ucred);
 }
@@ -2734,6 +2737,8 @@ static void command_auth(pa_pdispatch *pd, uint32_t command, uint32_t tag, pa_ta
     }
 
     setup_srbchannel(c, shm_type);
+
+    pa_hook_fire(&c->protocol->core->hooks[PA_CORE_HOOK_CLIENT_AUTH], c->client);
 }
 
 static void command_register_memfd_shmid(pa_pdispatch *pd, uint32_t command, uint32_t tag, pa_tagstruct *t, void *userdata) {

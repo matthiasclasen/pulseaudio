@@ -26,6 +26,7 @@
 #include <pulse/proplist.h>
 #include <pulsecore/core.h>
 #include <pulsecore/module.h>
+#include <pulsecore/creds.h>
 
 /* Every connection to the server should have a pa_client
  * attached. That way the user may generate a listing of all connected
@@ -38,6 +39,9 @@ struct pa_client {
     pa_proplist *proplist;
     pa_module *module;
     char *driver;
+
+    pa_creds creds;
+    bool creds_valid;
 
     pa_idxset *sink_inputs;
     pa_idxset *source_outputs;

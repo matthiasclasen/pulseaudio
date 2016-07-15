@@ -642,6 +642,7 @@ static void setup_context(pa_context *c, pa_iochannel *io) {
 
     ucred.uid = getuid();
     ucred.gid = getgid();
+    ucred.pid = getpid();
 
     pa_pstream_send_tagstruct_with_creds(c->pstream, t, &ucred);
 }

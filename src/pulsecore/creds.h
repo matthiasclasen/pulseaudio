@@ -41,6 +41,7 @@ typedef struct pa_cmsg_ancil_data pa_cmsg_ancil_data;
 struct pa_creds {
     gid_t gid;
     uid_t uid;
+    uid_t pid;
 };
 
 /* Struct for handling ancillary data, i e, extra data that can be sent together with a message
