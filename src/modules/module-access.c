@@ -89,6 +89,7 @@ struct userdata {
 
     pa_hashmap *clients;
     pa_hook_slot *client_put_slot;
+    pa_hook_slot *client_auth_slot;
     pa_hook_slot *client_proplist_changed_slot;
     pa_hook_slot *client_unlink_slot;
 };
@@ -370,6 +371,9 @@ static uint32_t find_policy_for_client (struct userdata *u, pa_client *cl) {
     pa_log ("client proplist %s", s);
     pa_xfree(s);
 
+    if (cl->creds_valid) {
+      pa_log ("client has trusted pid %d", cl->creds.pid);
+    }
     return u->default_policy;
 }
 
@@ -383,9 +387,32 @@ static pa_hook_result_t client_put_cb(pa_core *c, pa_object *o, struct userdata 
     cl = (pa_client *) o;
     pa_assert(cl);
 
+    /* when we get here, the client just connected and is not yet authenticated
+     * we should probably install a policy that denies all access */
     policy = find_policy_for_client(u, cl);
 
     client_data_new(u, cl->index, policy);
+
+    return PA_HOOK_OK;
+}
+
+static pa_hook_result_t client_auth_cb(pa_core *c, pa_object *o, struct userdata *u) {
+    pa_client *cl;
+    client_data *cd;
+    uint32_t policy;
+
+    pa_assert(c);
+    pa_object_assert_ref(o);
+
+    cl = (pa_client *) o;
+    pa_assert(cl);
+
+    cd = client_data_get (u, cl->index);
+    if (cd == NULL)
+        return PA_HOOK_OK;
+
+    policy = find_policy_for_client(u, cl);
+    cd->policy = policy;
 
     return PA_HOOK_OK;
 }
@@ -448,6 +475,7 @@ int pa__init(pa_module*m) {
                                                     (pa_free_cb_t) client_data_free);
 
     u->client_put_slot = pa_hook_connect(&u->core->hooks[PA_CORE_HOOK_CLIENT_PUT], PA_HOOK_EARLY, (pa_hook_cb_t) client_put_cb, u);
+    u->client_auth_slot = pa_hook_connect(&u->core->hooks[PA_CORE_HOOK_CLIENT_AUTH], PA_HOOK_EARLY, (pa_hook_cb_t) client_auth_cb, u);
     u->client_proplist_changed_slot = pa_hook_connect(&u->core->hooks[PA_CORE_HOOK_CLIENT_PROPLIST_CHANGED], PA_HOOK_EARLY, (pa_hook_cb_t) client_proplist_changed_cb, u);
     u->client_unlink_slot = pa_hook_connect(&u->core->hooks[PA_CORE_HOOK_CLIENT_UNLINK], PA_HOOK_EARLY, (pa_hook_cb_t) client_unlink_cb, u);
 
@@ -523,6 +551,8 @@ void pa__done(pa_module*m) {
 
     if (u->client_put_slot)
         pa_hook_slot_free(u->client_put_slot);
+    if (u->client_auth_slot)
+        pa_hook_slot_free(u->client_auth_slot);
     if (u->client_proplist_changed_slot)
         pa_hook_slot_free(u->client_proplist_changed_slot);
     if (u->client_unlink_slot)
