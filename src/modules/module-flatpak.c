@@ -533,7 +533,6 @@ static pa_hook_result_t client_put_cb(pa_core *c, pa_object *o, struct userdata 
     pa_client *cl;
     uint32_t policy;
 
-pa_log("client put\n");
     pa_assert(c);
     pa_object_assert_ref(o);
 
@@ -545,6 +544,8 @@ pa_log("client put\n");
     policy = find_policy_for_client(u, cl);
 
     client_data_new(u, cl->index, policy, cl->creds.pid);
+
+    pa_log("client put: policy %d, pid %u\n", policy, cl->creds.pid);
 
     return PA_HOOK_OK;
 }
@@ -566,6 +567,9 @@ static pa_hook_result_t client_auth_cb(pa_core *c, pa_object *o, struct userdata
 
     policy = find_policy_for_client(u, cl);
     cd->policy = policy;
+    cd->pid = cl->creds.pid;
+
+    pa_log("auth cb: policy %d, pid %u\n", cd->policy, cd->pid);
 
     return PA_HOOK_OK;
 }
